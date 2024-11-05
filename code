@@ -1,0 +1,116 @@
+# Bayesian IBNR Model Implementation for Cyber Incidents
+# This script integrates data preparation, model setup, MCMC sampling, post-processing, and visualization.
+
+# Load necessary libraries
+library(nimble)
+library(coda)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(doParallel)
+
+# Set up parallel computing
+num_cores <- detectCores() - 1  # Use available cores minus one to avoid overloading
+registerDoParallel(cores = num_cores)
+
+# PART 1: Data Preparation --------------------------------------------------
+
+# Load your data (replace 'path_to_file' with the actual file path)
+data <- read.csv("path_to_file/incident_data.csv")
+
+# Parse dates and calculate delay intervals
+data$report_date <- as.Date(data$report_date, format="%Y-%m-%d")
+data$incident_date <- as.Date(data$incident_date, format="%Y-%m-%d")
+data$delay <- interval(data$incident_date, data$report_date) %/% months(1)  # Delay in months
+
+# Organize data into an "incident triangle" format for Bayesian IBNR modeling
+incident_triangle <- data %>%
+  group_by(incident_period = year(incident_date), delay) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  spread(key = delay, value = count, fill = NA)
+
+# Define constants
+nT <- nrow(incident_triangle)         # Number of time periods
+nD <- ncol(incident_triangle) - 1     # Max delay period
+
+# PART 2: Model Setup -------------------------------------------------------
+
+# Define the Bayesian model using nimbleCode
+bayesian_ibnr_model <- nimbleCode({
+  for (t in 1:nT) {
+    for (d in 1:nD) {
+      y[t, d] ~ dnegbin(prob = pmatrix[t, d], size = lambda[t, d])   # Negative binomial likelihood
+
+      # Log-linear model for lambda (incident rate)
+      log(lambda[t, d]) <- g[1] + g[2] * t + g[3] * d / nD
+
+      # Linear model for pmatrix (reporting probability)
+      pmatrix[t, d] <- beta[1] + beta[2] * t + beta[3] * d / nD
+    }
+  }
+
+  # Priors for parameters
+  for (i in 1:3) {
+    g[i] ~ dnorm(0, sd = 1)
+    beta[i] ~ dnorm(0, sd = 1)
+  }
+})
+
+# Prepare model data and initial values
+data_list <- list(y = as.matrix(incident_triangle))
+constants <- list(nT = nT, nD = nD)
+inits <- list(g = rnorm(3), beta = rnorm(3))
+
+# Build and compile the model
+model <- nimbleModel(code = bayesian_ibnr_model, constants = constants, data = data_list, inits = inits)
+compiled_model <- compileNimble(model)
+
+# PART 3: MCMC Sampling -----------------------------------------------------
+
+# Configure MCMC with parallel chains
+mcmc_conf <- configureMCMC(model, monitors = c("g", "beta"))
+compiled_mcmc <- compileNimble(buildMCMC(mcmc_conf), project = model)
+
+# Run MCMC in parallel
+samples <- foreach(chain = 1:num_cores, .combine = coda::mcmc.list) %dopar% {
+  runMCMC(compiled_mcmc, nchains = 1, niter = 5000, nburnin = 1000, thin = 10, setSeed = chain)
+}
+
+# Save MCMC samples for future use
+save(samples, file = "mcmc_samples.RData")
+
+# PART 4: Post-Processing and Summarization ---------------------------------
+
+# Load samples if necessary
+# load("mcmc_samples.RData")
+
+# Summarize posterior samples
+summary(samples)
+
+# Calculate predictions using posterior means
+predictions <- apply(do.call(rbind, lapply(samples, as.matrix)), 2, median)
+
+# Calculate RMSE and MAE for model performance
+calculate_rmse <- function(pred, actual) sqrt(mean((pred - actual)^2))
+calculate_mae <- function(pred, actual) mean(abs(pred - actual))
+
+# Assuming `actual_data` contains true incident counts for validation
+actual_data <- read.csv("path_to_actual_data.csv")
+rmse <- calculate_rmse(predictions, actual_data$count)
+mae <- calculate_mae(predictions, actual_data$count)
+
+# Print RMSE and MAE
+cat("RMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+
+# PART 5: Visualization -----------------------------------------------------
+
+# Visualize predictions vs. actual counts
+ggplot() +
+  geom_line(data = actual_data, aes(x = period, y = count), color = "blue", linetype = "dotted") +
+  geom_line(data = as.data.frame(predictions), aes(x = seq_along(predictions), y = predictions), color = "red") +
+  labs(title = "Predicted vs Actual IBNR Counts", x = "Period", y = "Incident Count") +
+  theme_minimal()
+
+# Save the plot
+ggsave("predicted_vs_actual_plot.png")
