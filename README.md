@@ -47,3 +47,7 @@ To run the model using multiple parallel chains, the `doParallel` package is use
 
 The MCMC samples provide posterior distributions for all model parameters, including incident counts and the predictors.
  
+## R markdown example
+
+This repository also includes an R Markdown example (bayesianibnr_healthcare.Rmd) demonstrating the application of our model for predicting healthcare data breaches. The model utilizes a negative binomial distribution framework, with parameters estimated using MCMC methods through the nimble package in R. The example file walks users through each step, from loading and preparing synthetic healthcare data to configuring and running the model, interpreting posterior predictions, and visualizing the results.
+ 
